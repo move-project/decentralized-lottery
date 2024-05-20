@@ -9,6 +9,7 @@ module dlottery::dlottery {
     use sui::clock::Clock;
     use sui::coin;
     use sui::coin::{TreasuryCap, DenyCap, CoinMetadata};
+    use sui::event;
     use sui::object;
     use sui::object::UID;
     use sui::random;
@@ -34,7 +35,8 @@ module dlottery::dlottery {
         currentSupply: Balance<DLOTTERY>,
         timeA: u64,
         timeB: u64,
-        totalValue: u64, // the value of sui now
+        totalValue: u64, // the value of sui, which is used to caculate the profits after staking
+        isStaking: bool,
         admin: address
     }
     //otw, also the name of the shares
@@ -46,18 +48,55 @@ module dlottery::dlottery {
         customers: vector<address>,
         winers: table::Table<address, u64>,
         totalNumber: u64,
-
+        admin: address,
+        lsCreated: bool
     }
     // the amount of shares the owner has
     public struct Candate has store, drop{
         address: address,
         shares: u64,
     }
-
     //NAVI Account
     public struct NaviAccount has store, key{
         id: UID,
         naviAccount: AccountCap
+    }
+
+    //events
+    public struct PoolCreated has copy, drop{
+        pool_id: ID,
+        pool_SUI_value: u64,
+        shares_supply: u64,
+        admin: address
+    }
+    public struct CustomerDeposited has copy, drop{
+        customer: address,
+        SUI_input: u64,
+        shares_output: u64,
+        current_pool_SUI_profits: u64,
+        current_pool_shares: u64,
+        cueernt_customer_numbers: u64
+    }
+    public struct CustomerWithdrawed has copy, drop{
+        customer: address,
+        SUI_output: u64,
+        shares_input: u64,
+        current_pool_SUI_profits: u64,
+        current_pool_shares: u64,
+        cueernt_customer_numbers: u64
+    }
+    public struct DepositedToNavi has copy, drop{
+        timeStamp: u64,
+        SUI_value: u64,
+    }
+    public struct WithdrawedFromNavi has copy, drop{
+        timeStamp: u64,
+        SUI_value: u64,
+        pure_profits: u64
+    }
+    public struct ProfitsTaken has copy, drop{
+        winner: address,
+        rewards: u64
     }
 
     // 3days
@@ -69,18 +108,19 @@ module dlottery::dlottery {
     // sui asset_id
     const SUIASSETID: u8 = 0;
 
+    //errors
     // the Sui is not enough to buy one lottery
     const SUINOTENOUGH: u64 = 0;
-    // the amount want to buy is too large
-    const TOOMANYSUIS: u64 = 1;
     // the amount want to deposit is too large
-    const TOOMANYSHARES: u64 = 2;
+    const TOOMANYSHARES: u64 = 1;
     // the owner doesn't exsist in the table
-    const OWNERNOTEXSISTS: u64 = 3;
+    const OWNERNOTEXSISTS: u64 = 2;
     // ont the admin
-    const NOTADMIN: u64 = 4;
+    const NOTADMIN: u64 = 3;
     // time invalid
-    const  TIMENOTVALID: u64 = 5;
+    const  TIMENOTVALID: u64 = 4;
+    // during staking
+    const DURINGSTAKING: u64 = 5;
 
 
     fun init(otw: DLOTTERY, ctx: &mut TxContext){
@@ -110,16 +150,23 @@ module dlottery::dlottery {
             winers: table::new(ctx),
             customers: vector::empty<address>(),
             totalNumber: 0,
+            admin: sender(ctx),
+            lsCreated: false
         };
         transfer::public_share_object(candates);
 
         // create the NAVI account
         let cap = lending::create_account(ctx);
         transfer::public_share_object(NaviAccount{id: object::new(ctx), naviAccount: cap})
+
     }
 
     // the function used to ceate pool by the admin
-    public entry fun createPool(treasuryCap: &mut TreasuryCap<DLOTTERY>, clock: &Clock, ctx: &mut TxContext){
+    public entry fun createPool(treasuryCap: &mut TreasuryCap<DLOTTERY>, clock: &Clock, ckey: &Candates, ctx: &mut TxContext){
+        // make sure is the admin and can only be called for once
+        assert!(ckey.lsCreated == false && ckey.admin == sender(ctx), NOTADMIN);
+        // update the state
+        ckey.lsCreated == true;
         // init the LStorage
         let mut lstorage = LStorage{ //mut
             id: object::new(ctx),
@@ -128,14 +175,19 @@ module dlottery::dlottery {
             timeA: clock::timestamp_ms(clock),
             timeB: clock::timestamp_ms(clock) + THREEDAYS, //+ 3days
             totalValue: 0,
+            isStaking: false,
             admin: sender(ctx)
         };
+        let ls_id = object::id(&lstorage);
+
         // the total supply of the lottery is 100
         let lc_coin = coin::mint(treasuryCap, TOTALSHARES, ctx);
         // put lottery all in the storage
         coin::put(&mut lstorage.currentSupply, lc_coin);
         // share the storage so everyone can exchange the lottery
         transfer::share_object(lstorage);
+
+        event::emit(PoolCreated{pool_id: ls_id, pool_SUI_value: 0, shares_supply: TOTALSHARES, admin: sender(ctx)});
     }
 
     // the function used to buy the lotteries and return the shares(LT) to the buyers
@@ -143,6 +195,8 @@ module dlottery::dlottery {
     public entry fun deposit(mut payment: coin::Coin<SUI>,  amount: u64, lstorage: &mut LStorage, candate: &mut Candates, clock: &Clock, ctx: &mut TxContext){
         // make sure time is valid, assert if invalid
         isValidTime(lstorage, clock);
+        // make sure is not during staking
+        assert!(lstorage.isStaking == false, DURINGSTAKING);
         // the maxium of the number of shares of a customer can buy is 20, and haven't been sold out
         assert!(amount <= 20 && balance::value(&lstorage.currentSupply) > 0, TOOMANYSHARES);
         // should have enough Sui, value is the number of the coin, here at least 0.1 sui means 10 ^ 7
@@ -174,6 +228,15 @@ module dlottery::dlottery {
         let lottery = coin::take(&mut lstorage.currentSupply, amount, ctx);
         transfer::public_transfer(payment, sender(ctx));
         transfer::public_transfer(lottery, sender(ctx));
+
+        event::emit(CustomerDeposited{
+            customer: sender(ctx),
+            SUI_input: amount * 10000000,
+            shares_output: amount,
+            current_pool_SUI_profits: lstorage.totalValue,
+            current_pool_shares: balance::value(&lstorage.currentSupply),
+            cueernt_customer_numbers: candate.totalNumber
+        });
     }
 
     //can only be called during the period of 3 days
@@ -182,6 +245,8 @@ module dlottery::dlottery {
         assert!(vector::contains(&candate.customers, &sender(ctx)), OWNERNOTEXSISTS);
         //make sure the time is valid or assert
         isValidTime(lstorage, clock);
+        // make sure is not during staking
+        assert!(lstorage.isStaking == false, DURINGSTAKING);
 
         // get the number of the shares belongs to the owner
         let (_, _index) = vector::index_of(&candate.customers, &sender(ctx));
@@ -221,44 +286,78 @@ module dlottery::dlottery {
         let sharesInput = coin::split(&mut shares, amount, ctx);
         coin::put(&mut lstorage.currentSupply, sharesInput);
         transfer::public_transfer(sui, sender(ctx));
-        transfer::public_transfer(shares, sender(ctx))
+        transfer::public_transfer(shares, sender(ctx));
+
+        event::emit(CustomerWithdrawed{
+            customer: sender(ctx),
+            SUI_output: amount * 10000000,
+            shares_input: amount,
+            current_pool_SUI_profits: lstorage.totalValue,
+            current_pool_shares: balance::value(&lstorage.currentSupply),
+            cueernt_customer_numbers: candate.totalNumber
+        });
     }
 
     // the function for NAVI deposit, only admin can call
     public entry fun depositToNavi(clock: &Clock, lstorage:&mut LStorage, me: &NaviAccount, storage: &mut Storage, pool: &mut Pool<SUI>, incentive_v1: &mut IncentiveV1, incentive_v2: &mut IncentiveV2, ctx: &mut TxContext){
-        //make sure time is valid
-        isValidTime(lstorage, clock);
+        //make sure time is valid, this should be during the 7 days
+        !isValidTime(lstorage, clock);
+        // make sure is not during staking
+        assert!(lstorage.isStaking == false, DURINGSTAKING);
         // make sure is the admin
         assert!(sender(ctx) == lstorage.admin, NOTADMIN);
         // make sure the balance is not 0
         assert!(balance::value(&lstorage.currentSupply) == 0, SUINOTENOUGH);
+
+        //update the symbol
+        lstorage.isStaking == true;
+        // update the timeStamp manually
+        lstorage.timeA = clock::timestamp_ms(clock);
+        lstorage.timeB = lstorage.timeA + SEVENDAYS;
+
         // place the sui in th navi pool, do not update the totalvalue because it will be used to calculate the profits, l sui is used to pay the gas fee
         incentive_v2::deposit_with_account_cap(clock, storage, pool, SUIASSETID, coin::take(&mut lstorage.profits, lstorage.totalValue - 100000000, ctx), incentive_v1, incentive_v2, &me.naviAccount);
+
+        event::emit(DepositedToNavi{
+            timeStamp: clock::timestamp_ms(clock),
+            SUI_value: lstorage.totalValue - 100000000
+        });
     }
 
     // withdraw from NAVI
-    public entry fun withdrawFromNavi(clock: &Clock, lstorage:&mut LStorage, incentive_v1: &mut IncentiveV1, incentive_v2: &mut IncentiveV2, funds_pool: &mut IncentiveFundsPool<SUI>, pool: &mut Pool<SUI>, storage: &mut Storage, me: &NaviAccount, oracle: &PriceOracle, ctx: &mut TxContext){
-        //make sure time is valid
+    public entry fun withdrawFromNavi(clock: &Clock, lstorage:&mut LStorage, incentive_v1: &mut IncentiveV1, incentive_v2: &mut IncentiveV2, funds_pool: &mut IncentiveFundsPool<SUI>, pool: &mut Pool<SUI>, storage: &mut Storage, me: &NaviAccount, oracle: &PriceOracle, candates: &mut Candates, r: &Random, ctx: &mut TxContext){
+        //make sure time is valid, 7 days after started staking
         isValidTime(lstorage, clock);
         // make sure is the admin
         assert!(sender(ctx) == lstorage.admin, NOTADMIN);
+        // make sure is during staking
+        assert!(lstorage.isStaking == true, TIMENOTVALID);
+
         // do not update the totalvalue because it will be used to calculate the profits
         let option = 0;        // option?
         let profits = incentive_v2::claim_reward_with_account_cap(clock, incentive_v2, funds_pool, storage, SUIASSETID, option, &me.naviAccount);
+        let pure_profits = balance::value(&profits);
         // pu the profits in the lstorage
         balance::join(&mut lstorage.profits, profits);
         let sui = incentive_v2::withdraw_with_account_cap(clock, oracle, storage, pool, SUIASSETID,lstorage.totalValue - 100000000, incentive_v1, incentive_v2, &me.naviAccount);
+        let sui_value = balance::value(&sui);
         balance::join(&mut lstorage.profits, sui);
+
+        // call the funtion choose winners before the customers can get their rewards
+        chooseWiners(lstorage, candates, r, ctx);
+        // update the staking symbol
+        lstorage.isStaking == false;
+
+        event::emit(WithdrawedFromNavi{
+            timeStamp: clock::timestamp_ms(clock),
+            SUI_value: sui_value,
+            pure_profits
+        });
     }
 
     // the function used to caculate the ratio of Sui each participiant put in the pool and choose the winers
     // only the admin can do this
-    public  entry fun chooseWiners(clock: &Clock, lstorage:&mut LStorage, candates: &mut Candates, r: &Random, ctx: &mut TxContext){
-        // make sure the time is valid
-        isValidTime(lstorage, clock);
-        //only admin can call this function
-        assert!(sender(ctx) == lstorage.admin, NOTADMIN);
-
+    fun chooseWiners(lstorage:&LStorage, candates: &mut Candates, r: &Random, ctx: &mut TxContext){
         // get the random number and save in the vector
         let mut generator = new_generator(r, ctx);
         let mut randomNumbers = vector::empty<u64>();
@@ -289,32 +388,42 @@ module dlottery::dlottery {
         vector::destroy_empty(randomNumbers);
     }
 
-    // the funxrion used to check whether is the winner
+    // the function for customers to take the profits
     public entry fun takeProfits(clock: &Clock, lstorage: &mut LStorage, candates: &mut Candates, ctx: &mut TxContext){
         // make sure time is valid
         isValidTime(lstorage, clock);
+        // make sure is not during staking
+        assert!(lstorage.isStaking == false, DURINGSTAKING);
         // make sure is the winner
         if(table::contains(&candates.winers, sender(ctx))){
+            // remove from the winners table
             let _amount = table::remove(&mut candates.winers, sender(ctx));
             let _sui = coin::take(&mut lstorage.profits, _amount, ctx);
+            let valueTransfered = coin::value(&_sui);
             transfer::public_transfer(_sui, sender(ctx));
-        }
+            event::emit(ProfitsTaken{winner: sender(ctx), rewards: valueTransfered});
+        };
     }
 
     // A----3days------B-------7days--------C---3days---D---------7days------E......
-    // can only do this during the 3 days
+    // only return true during the 3 days
     // this function will try to update the timestampA/B
-    fun isValidTime(lstorage:&mut LStorage, clock: &Clock){
+    fun isValidTime(lstorage:&mut LStorage, clock: &Clock): bool{
         if(lstorage.timeB - lstorage.timeA == THREEDAYS){ //3
-            if(clock::timestamp_ms(clock) > lstorage.timeB){
+            if(clock::timestamp_ms(clock) >= lstorage.timeB){
                 lstorage.timeA = lstorage.timeB;
                 lstorage.timeB = lstorage.timeB +SEVENDAYS ;
-                assert!(clock::timestamp_ms(clock) < lstorage.timeA,  TIMENOTVALID);
-            }
+                return false
+            };
+            return true
         }else { //7
-            if(clock::timestamp_ms(clock) > lstorage.timeB){
+            if(clock::timestamp_ms(clock) < lstorage.timeB){
+                return false
+            }else {
                 lstorage.timeA = lstorage.timeB;
-            }
+                lstorage.timeB = lstorage.timeB + THREEDAYS;
+            };
+            return true
         }
     }
 
@@ -323,8 +432,8 @@ module dlottery::dlottery {
         init(DLOTTERY{}, ctx);
     }
     #[test_only]
-    public fun test_create_pool(treasuryCap: &mut TreasuryCap<DLOTTERY>, clock: &Clock, ctx: &mut TxContext){
-        createPool(treasuryCap, clock, ctx);
+    public fun test_create_pool(treasuryCap: &mut TreasuryCap<DLOTTERY>, clock: &Clock, ckey: &Candates, ctx: &mut TxContext){
+        createPool(treasuryCap, clock, ckey, ctx);
     }
     #[test_only]
     public fun test_deposit(payment: coin::Coin<SUI>,  amount: u64, lstorage: &mut LStorage, candate: &mut Candates, clock: &Clock, ctx: &mut TxContext){
@@ -333,10 +442,6 @@ module dlottery::dlottery {
     #[test_only]
     public fun test_withdraw(amount: u64, shares: coin::Coin<DLOTTERY>, lstorage: &mut LStorage, candate: &mut Candates, clock: &Clock, ctx: &mut TxContext){
         withdraw(amount, shares, lstorage, candate, clock, ctx);
-    }
-    #[test_only]
-    public fun test_chooseWinners(clock: &Clock, lstorage:&mut LStorage, candates: &mut Candates, r: &Random, ctx: &mut TxContext){
-        chooseWiners(clock, lstorage, candates, r, ctx);
     }
     #[test_only]
     public fun test_takeProfits(clock: &Clock, lstorage: &mut LStorage, candates: &mut Candates, ctx: &mut TxContext){
