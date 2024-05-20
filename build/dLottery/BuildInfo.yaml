@@ -1,0 +1,37 @@
+---
+compiled_package_info:
+  package_name: dLottery
+  address_alias_instantiation:
+    dlottery: "0000000000000000000000000000000000000000000000000000000000000000"
+    lending_core: d899cf7d2b5db716bd2cf55599fb0d5ee38a3061e7b6bb6eebf73fa5bc4c81ca
+    math: 7d53e2604afdfec60bbfaa9f1a912594901be384fba2d14e51f2b4a22119e771
+    oracle: ca441b44943c16be0e6e23c5a955bb971537ea3289ae8016fbf33fffe1fd210f
+    std: "0000000000000000000000000000000000000000000000000000000000000001"
+    sui: "0000000000000000000000000000000000000000000000000000000000000002"
+    utils: 7d53e2604afdfec60bbfaa9f1a912594901be384fba2d14e51f2b4a22119e771
+  source_digest: 621F9FD3864DA648A374F28C5E7B2908BA4E79A691872A52F24D761112489027
+  build_flags:
+    dev_mode: false
+    test_mode: false
+    generate_docs: false
+    install_dir: ~
+    force_recompilation: false
+    lock_file: ".\\Move.lock"
+    fetch_deps_only: false
+    skip_fetch_latest_git_deps: false
+    default_flavor: sui
+    default_edition: ~
+    deps_as_root: false
+    silence_warnings: false
+    warnings_are_errors: false
+    additional_named_addresses: {}
+    lint_flag:
+      no_lint: false
+      lint: false
+dependencies:
+  - MoveStdlib
+  - Sui
+  - lending_core
+  - math
+  - oracle
+  - utils
